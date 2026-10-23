@@ -1,0 +1,74 @@
+@page "/"
+@inherits LiveComponentBase
+
+<PageTitle>Smart-X · Gateway</PageTitle>
+
+<header class="page-head">
+    <div>
+        <p class="eyebrow">Smart-X IoT Mesh Ecosystem</p>
+        <h1>Gateway console</h1>
+        <p class="lede">Ingest, validate and route telemetry from ESP32 sensor nodes across hydroponic farms and smart-grid sub-stations.</p>
+    </div>
+    @if (_status is not null)
+    {
+        <div class="kpis compact">
+            <div class="kpi"><span>Sensors online</span><strong>@_status.Online<small>/@_status.DeviceCount</small></strong></div>
+            <div class="kpi"><span>Stale · Offline</span><strong>@_status.Stale <small>·</small> @_status.Offline</strong></div>
+            <div class="kpi"><span>Packets processed</span><strong>@_status.PacketsProcessed.ToString("N0")</strong></div>
+            <div class="kpi"><span>Queue depth</span><strong>@_status.FifoDepth<small> FIFO</small> · @_status.PriorityDepth<small> PRI</small></strong></div>
+        </div>
+    }
+</header>
+
+@if (!ApiOnline)
+{
+    <div class="banner bad">
+        <strong>The gateway API isn't reachable.</strong> Start it with <code>dotnet run --project src/SmartX.Api</code> (port 5080), then this page reconnects automatically.
+    </div>
+}
+
+<section class="pillars">
+    @foreach (var p in _status?.Pillars ?? [])
+    {
+        if (p.Enabled)
+        {
+            <a class="pillar" href="@p.Route">
+                <span class="pillar-ico">@p.Icon</span>
+                <span class="tag">@p.Part</span>
+                <h2>@p.Title</h2>
+                <p>@p.Description</p>
+                <span class="go">Open module →</span>
+            </a>
+        }
+        else
+        {
+            <div class="pillar disabled" aria-disabled="true">
+                <span class="pillar-ico">🔒</span>
+                <span class="tag">@p.Part</span>
+                <h2>@p.Title</h2>
+                <p>@p.Description</p>
+                <span class="go">Disabled - unlocks in @p.Part</span>
+            </div>
+        }
+    }
+</section>
+
+<section class="card flow">
+    <h2>How a packet travels through the gateway</h2>
+    <ol class="flow-steps">
+        <li><strong>ESP32 node</strong><span>POST /api/telemetry/{float|int|bool}</span></li>
+        <li><strong>Edge validation</strong><span>O(1) MAC lookup in <code>Dictionary</code>, type &amp; clock checks</span></li>
+        <li><strong>Lane routing</strong><span>Critical → <code>PriorityQueue</code>, others → <code>Queue&lt;T&gt;</code></span></li>
+        <li><strong>Typed storage</strong><span><code>TelemetryPacket&lt;T&gt;</code> → jagged rows → <code>List&lt;T&gt;</code></span></li>
+        <li><strong>Indexes</strong><span><code>SortedDictionary</code> timeline · AVL archive · mesh graph</span></li>
+        <li><strong>Dashboard</strong><span>Anomaly Radar, suggested actions, MST routing</span></li>
+    </ol>
+</section>
+
+@code {
+    private GatewayStatusDto? _status;
+
+    protected override TimeSpan RefreshInterval => TimeSpan.FromSeconds(3);
+
+    protected override async Task RefreshAsync(CancellationToken ct) => _status = await Api.GetStatusAsync(ct);
+}

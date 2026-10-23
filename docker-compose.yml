@@ -1,0 +1,44 @@
+# docker compose up --build   →   dashboard on http://localhost:5090
+services:
+  api:
+    build:
+      context: .
+      dockerfile: src/SmartX.Api/Dockerfile
+    container_name: smartx-api
+    ports:
+      - "5080:8080"
+    environment:
+      - Gateway__ActivePillars=3
+    volumes:
+      - smartx-attachments:/app/App_Data   # encrypted uploads + key survive restarts
+    healthcheck:
+      test: ["CMD-SHELL", "dotnet --version >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  web:
+    build:
+      context: .
+      dockerfile: src/SmartX.Web/Dockerfile
+    container_name: smartx-web
+    ports:
+      - "5090:8080"
+    environment:
+      - SmartXApi__BaseUrl=http://api:8080
+    depends_on:
+      - api
+
+  simulator:
+    build:
+      context: .
+      dockerfile: src/SmartX.DeviceSimulator/Dockerfile
+    container_name: smartx-simulator
+    environment:
+      - SMARTX_API=http://api:8080
+    depends_on:
+      - api
+    restart: on-failure
+
+volumes:
+  smartx-attachments:

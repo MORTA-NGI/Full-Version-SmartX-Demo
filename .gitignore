@@ -1,0 +1,15 @@
+# Build output
+bin/
+obj/
+publish/
+*.user
+*.suo
+.vs/
+
+# Runtime data (encrypted uploads + generated key) - never commit
+**/App_Data/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/

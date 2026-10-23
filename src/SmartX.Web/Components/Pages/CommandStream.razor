@@ -1,0 +1,371 @@
+@page "/stream"
+@inherits LiveComponentBase
+
+<PageTitle>Command Stream · Smart-X</PageTitle>
+
+<PillarGuard Key="stream" Title="Real-Time Command Stream" Part="Part 2">
+    <header class="page-head">
+        <div>
+            <p class="eyebrow">Pillar 2 · Part 2</p>
+            <h1>Real-time command stream &amp; history</h1>
+            <p class="lede">Watch packets flow through the FIFO and priority lanes, override actuators with one-click undo, and act on suggestions before you go looking.</p>
+        </div>
+        <span class="updated">@(LastUpdatedUtc is null ? "" : $"Live · {TimeFormat.Clock(LastUpdatedUtc.Value)}")</span>
+    </header>
+
+    @if (_stats is not null)
+    {
+        <section class="kpis">
+            <div class="kpi"><span>FIFO queue · <code>Queue&lt;T&gt;</code></span><strong>@_stats.FifoDepth.ToString("N0")</strong><small>avg latency @_stats.AvgFifoLatencyMs.ToString("N0") ms</small></div>
+            <div class="kpi accent-bad"><span>Priority lane · <code>PriorityQueue</code></span><strong>@_stats.PriorityDepth</strong><small>avg latency @_stats.AvgPriorityLatencyMs.ToString("N0") ms · @_stats.PriorityProcessed processed</small></div>
+            <div class="kpi"><span>Throughput</span><strong>@_stats.ProcessedPerSecond.ToString("N0")<small>/s</small></strong><small>@_stats.Processed.ToString("N0") total</small></div>
+            <div class="kpi"><span>Duplicates suppressed · <code>HashSet</code></span><strong>@_stats.DuplicateAlertsSuppressed.ToString("N0")</strong><small>@_stats.DisconnectedNodes.Count disconnected · @_stats.ActiveErrorStates.Count active errors</small></div>
+            <div class="kpi"><span>Undo depth · <code>Stack&lt;T&gt;</code></span><strong>@(_commands?.UndoStack.Count ?? 0)</strong><small>last command reverts first</small></div>
+        </section>
+    }
+
+    <section class="card demo-bar">
+        <div>
+            <strong>Load test the lanes</strong>
+            <span class="muted small">Flood the FIFO queue, then fire a critical reading and watch it jump the backlog.</span>
+        </div>
+        <div class="inline-form">
+            <button class="btn" @onclick="() => FloodAsync(false)" disabled="@_busy">Flood 3 000 packets</button>
+            <select @bind="Ui.CriticalTarget" aria-label="Critical alert device">
+                @foreach (var d in _all.Where(d => d.Kind != ValueKind.Bool))
+                {
+                    <option value="@d.DisplayName">@d.DisplayName</option>
+                }
+            </select>
+            <button class="btn danger" @onclick="InjectAsync" disabled="@_busy">Inject critical alert</button>
+            <button class="btn primary" @onclick="() => FloodAsync(true)" disabled="@_busy">Flood + critical</button>
+        </div>
+    </section>
+
+    <div class="grid stream-grid">
+        <!-- ───────── device search & live cards ───────── -->
+        <section class="card span-2">
+            <div class="card-head">
+                <h2>Devices</h2>
+                <form class="filters" @onsubmit="SearchAsync" @onsubmit:preventDefault>
+                    <input type="search" placeholder="Search devices (Enter to search)…" @bind="Ui.StreamQuery" aria-label="Search" />
+                    <select @bind="Ui.StreamCategory" @bind:after="SearchAsync" aria-label="Category">
+                        <option value="">All categories</option>
+                        @foreach (var c in Enum.GetValues<SensorCategory>())
+                        {
+                            <option value="@c">@c</option>
+                        }
+                    </select>
+                </form>
+            </div>
+            <div class="chips" role="group" aria-label="Alert state filter">
+                @foreach (var (key, label) in States)
+                {
+                    <button class="chip @(Ui.StreamState == key ? "active" : "")" @onclick="() => SetState(key)">@label</button>
+                }
+                <span class="muted small">@(_devices?.Total ?? 0) shown · @(_devices?.ElapsedMs ?? 0) ms</span>
+            </div>
+            <div class="device-grid">
+                @foreach (var d in _devices?.Devices ?? [])
+                {
+                    <article class="device-card @(d.Mac == Ui.StreamSelectedMac ? "selected" : "") @StatusCss(d)" @key="d.Mac" @onclick="() => SelectAsync(d.Mac)">
+                        <header>
+                            <strong>@d.DisplayName</strong>
+                            <StatusPill Status="d.Status" Severity="d.Severity" />
+                        </header>
+                        <div class="reading">
+                            @if (d.Category == SensorCategory.Actuator)
+                            {
+                                <span class="big">@(d.ActuatorOn == true ? "ON" : "OFF")</span><small>desired</small>
+                            }
+                            else
+                            {
+                                <span class="big">@d.LastDisplay</span><small>@d.Unit</small>
+                            }
+                        </div>
+                        <footer>
+                            <small class="muted">@d.Zone</small>
+                            @foreach (var a in d.ActiveAlerts.Take(2))
+                            {
+                                <span class="tag-alert">@a.Replace('_', ' ')</span>
+                            }
+                        </footer>
+                    </article>
+                }
+            </div>
+        </section>
+
+        <!-- ───────── suggested actions ───────── -->
+        <section class="card insights">
+            <div class="card-head">
+                <h2>🔮 Suggested actions</h2>
+                <span class="muted small">@(_insights?.LearnedActions ?? 0) operator actions learned</span>
+            </div>
+            @if (_insights is null || _insights.Suggestions.Count == 0)
+            {
+                <p class="muted">All quiet - no recommendations right now.</p>
+            }
+            else
+            {
+                <ul class="suggestions">
+                    @foreach (var s in _insights.Suggestions)
+                    {
+                        <li class="suggestion @s.Kind.ToLowerInvariant()" @key="s.Id">
+                            <div class="sg-head">
+                                <strong>@s.Title</strong>
+                                <span class="confidence" title="Confidence"><i style="width:@((s.Confidence * 100).ToString("0"))%"></i>@((s.Confidence * 100).ToString("0"))%</span>
+                            </div>
+                            <p>@s.Reason</p>
+                            <div class="sg-foot">
+                                <small class="muted">@s.Evidence</small>
+                                @if (s.Kind == "Command" && s.Mac is not null && s.Action is not null)
+                                {
+                                    <button class="btn small primary" @onclick="() => ApplyAsync(s)">Apply</button>
+                                }
+                                else if (s.Mac is not null)
+                                {
+                                    <button class="btn small" @onclick="() => SelectAsync(s.Mac)">Inspect</button>
+                                }
+                            </div>
+                        </li>
+                    }
+                </ul>
+            }
+            @if (_insights?.Patterns.Count > 0)
+            {
+                <details class="patterns">
+                    <summary>Learned patterns (@_insights.Patterns.Count)</summary>
+                    <table class="table compact">
+                        <thead><tr><th>Type</th><th>When</th><th>Then</th><th class="num">Seen</th><th class="num">P</th></tr></thead>
+                        <tbody>
+                            @foreach (var p in _insights.Patterns)
+                            {
+                                <tr><td>@p.Type</td><td>@p.When</td><td>@p.Then</td><td class="num">@p.Count</td><td class="num">@p.Probability.ToString("P0")</td></tr>
+                            }
+                        </tbody>
+                    </table>
+                </details>
+            }
+        </section>
+
+        <!-- ───────── selected device: timeline + overrides ───────── -->
+        <section class="card span-2">
+            @if (_selected is null)
+            {
+                <h2>Device timeline &amp; overrides</h2>
+                <p class="muted">Select a device card to see its timeline and send manual override commands.</p>
+            }
+            else
+            {
+                <div class="card-head">
+                    <div>
+                        <h2>@_selected.DisplayName <StatusPill Status="_selected.Status" Severity="_selected.Severity" /></h2>
+                        <p class="muted small">@_selected.LocationPath</p>
+                    </div>
+                    @if (_selected.Category == SensorCategory.Actuator)
+                    {
+                        <div class="inline-form">
+                            <button class="btn primary" @onclick="() => CommandAsync(_selected.Mac, CommandAction.On)">Switch ON</button>
+                            <button class="btn" @onclick="() => CommandAsync(_selected.Mac, CommandAction.Off)">Switch OFF</button>
+                            <button class="btn ghost" @onclick="() => CommandAsync(_selected.Mac, CommandAction.Toggle)">Toggle</button>
+                        </div>
+                    }
+                </div>
+                <LineChart Points="_timeline?.Points" NormalMin="_timeline?.NormalMin" NormalMax="_timeline?.NormalMax" Unit="@_selected.Unit" Height="200" />
+                <p class="muted small">Rendered straight from the API's <code>SortedDictionary&lt;DateTime, double&gt;</code> - always in time order, no sorting at read time.</p>
+            }
+        </section>
+
+        <!-- ───────── undo stack ───────── -->
+        <section class="card">
+            <div class="card-head">
+                <h2>↶ Command history</h2>
+                <button class="btn small danger" @onclick="UndoAsync" disabled="@(_commands?.UndoStack.Count is null or 0)">Undo last</button>
+            </div>
+            <div class="batch">
+                <button class="btn small" @onclick='() => BatchAsync("valve_state", CommandAction.Off)'>Shut all valves</button>
+                <button class="btn small" @onclick='() => BatchAsync("pump_state", CommandAction.Off)'>Stop all pumps</button>
+                <button class="btn small" @onclick='() => BatchAsync("relay_state", CommandAction.On)'>All relays on</button>
+            </div>
+            <ol class="stack">
+                @foreach (var c in _commands?.UndoStack ?? [])
+                {
+                    <li>
+                        <strong>@c.Description</strong>
+                        <small class="muted">@TimeFormat.Clock(c.IssuedUtc) · @c.Source · @c.TargetCount device(s)</small>
+                    </li>
+                }
+            </ol>
+            @if (_commands?.UndoStack.Count is null or 0)
+            {
+                <p class="muted small">Stack is empty - issue a command to build history.</p>
+            }
+        </section>
+
+        <!-- ───────── processing lanes ───────── -->
+        <section class="card">
+            <h2>Processing order</h2>
+            <p class="muted small">Most recent first. PRIORITY rows were dequeued ahead of any FIFO backlog.</p>
+            <ul class="lane-log">
+                @foreach (var r in _stats?.Recent ?? [])
+                {
+                    <li class="@r.Lane.ToLowerInvariant()">
+                        <span class="lane">@r.Lane</span>
+                        <span>@r.DeviceName</span>
+                        <span class="mono">@r.Display</span>
+                        <span class="mono muted">@r.LatencyMs.ToString("0") ms</span>
+                    </li>
+                }
+            </ul>
+        </section>
+
+        <section class="card">
+            <h2>Unique alert sets</h2>
+            <h3 class="sub">Disconnected nodes <small class="muted">HashSet&lt;string&gt;</small></h3>
+            <div class="chips">
+                @foreach (var mac in _stats?.DisconnectedNodes ?? [])
+                {
+                    <span class="chip bad mono">@NameOf(mac)</span>
+                }
+                @if (_stats?.DisconnectedNodes.Count is null or 0) { <span class="muted small">None</span> }
+            </div>
+            <h3 class="sub">Active error states <small class="muted">HashSet&lt;AlertKey&gt;</small></h3>
+            <div class="chips">
+                @foreach (var e in (_stats?.ActiveErrorStates ?? []).Where(e => !e.EndsWith("DISCONNECTED")))
+                {
+                    var parts = e.Split(" · ");
+                    <span class="chip warn">@NameOf(parts[0]) · @parts[^1].Replace('_', ' ')</span>
+                }
+            </div>
+        </section>
+
+        <section class="card span-2">
+            <h2>Alert feed</h2>
+            <ul class="feed">
+                @foreach (var a in _stats?.Alerts ?? [])
+                {
+                    <li class="feed-item @a.Severity.ToString().ToLowerInvariant()">
+                        <span class="feed-kind">@a.Code.Replace('_', ' ')</span>
+                        <span>@a.Message</span>
+                        <time>@TimeFormat.Clock(a.RaisedUtc)</time>
+                    </li>
+                }
+            </ul>
+        </section>
+    </div>
+</PillarGuard>
+
+@code {
+    private static readonly (string Key, string Label)[] States =
+    [
+        ("", "All"), ("alerting", "Alerting"), ("critical", "Critical"), ("warning", "Warning"),
+        ("disconnected", "Disconnected"), ("healthy", "Healthy")
+    ];
+
+    private StreamStatsDto? _stats;
+    private DeviceSearchResultDto? _devices;
+    private InsightsDto? _insights;
+    private CommandStateDto? _commands;
+    private DeviceDto? _selected;
+    private DeviceTimelineDto? _timeline;
+    private bool _busy;
+    private bool _recordNextSearch;
+
+    protected override TimeSpan RefreshInterval => TimeSpan.FromMilliseconds(1500);
+
+    protected override async Task RefreshAsync(CancellationToken ct)
+    {
+        // Independent calls run concurrently - the page never waits on them one by one.
+        var stats = Api.GetStreamStatsAsync(ct);
+        var devices = Api.SearchDevicesAsync(Ui.StreamQuery, Ui.StreamCategory, Ui.StreamState, _recordNextSearch, ct);
+        var insights = Api.GetInsightsAsync(ct);
+        var commands = Api.GetCommandsAsync(ct);
+        var all = Api.SearchDevicesAsync(null, null, null, false, ct);
+        _recordNextSearch = false;
+        await Task.WhenAll(stats, devices, insights, commands, all);
+        (_stats, _devices, _insights, _commands) = (stats.Result, devices.Result, insights.Result, commands.Result);
+        _all = all.Result?.Devices ?? _all;
+
+        if (Ui.StreamSelectedMac is not null)
+        {
+            _selected = _all.FirstOrDefault(d => d.Mac == Ui.StreamSelectedMac) ?? await Api.GetDeviceAsync(Ui.StreamSelectedMac, ct);
+            _timeline = await Api.GetTimelineAsync(Ui.StreamSelectedMac, 10, ct);
+        }
+    }
+
+    private async Task SearchAsync()
+    {
+        _recordNextSearch = !string.IsNullOrWhiteSpace(Ui.StreamQuery); // searches feed the predictive engine
+        await SafeRefreshAsync();
+    }
+
+    private async Task SetState(string key)
+    {
+        Ui.StreamState = key;
+        await SafeRefreshAsync();
+    }
+
+    private async Task SelectAsync(string mac)
+    {
+        Ui.StreamSelectedMac = mac;
+        await Api.InspectAsync(mac, Token);
+        await SafeRefreshAsync();
+    }
+
+    private async Task CommandAsync(string mac, CommandAction action, string source = "Manual")
+    {
+        var r = await Api.IssueCommandAsync(new CommandRequest { Mac = mac, Action = action, Source = source }, Token);
+        if (r.Ok) Toasts.Success($"{r.Value!.Description} · {string.Join(", ", r.Value.Changes)}");
+        else Toasts.Error(r.Error!);
+        await SafeRefreshAsync();
+    }
+
+    private async Task BatchAsync(string metric, CommandAction action)
+    {
+        var r = await Api.IssueCommandAsync(new CommandRequest { Scope = CommandScope.AllOfMetric, Metric = metric, Action = action }, Token);
+        if (r.Ok) Toasts.Success($"{r.Value!.Description}. Undo restores all {r.Value.TargetCount} at once.");
+        else Toasts.Error(r.Error!);
+        await SafeRefreshAsync();
+    }
+
+    private async Task UndoAsync()
+    {
+        var r = await Api.UndoAsync(Token);
+        if (r.Ok) Toasts.Info($"{r.Value!.Description} → {string.Join(", ", r.Value.Changes)}");
+        else Toasts.Warn(r.Error!);
+        await SafeRefreshAsync();
+    }
+
+    private async Task ApplyAsync(SuggestionDto s) => await CommandAsync(s.Mac!, s.Action!.Value, "Suggestion");
+
+    private async Task InjectAsync()
+    {
+        _busy = true;
+        var r = await Api.InjectCriticalAsync(Ui.CriticalTarget, Token);
+        _busy = false;
+        if (r.Ok) Toasts.Warn($"Critical reading for {Ui.CriticalTarget} sent → {r.Value!.Lane} lane (seq {r.Value.Sequence}).");
+        else Toasts.Error(r.Error!);
+        await SafeRefreshAsync();
+    }
+
+    private async Task FloodAsync(bool withCritical)
+    {
+        _busy = true;
+        await Api.FloodAsync(3000, Token);
+        if (withCritical)
+        {
+            var r = await Api.InjectCriticalAsync(Ui.CriticalTarget, Token);
+            if (r.Ok) Toasts.Warn($"3 000 packets queued, then a critical {Ui.CriticalTarget} reading - watch it bypass the backlog.");
+        }
+        else Toasts.Info("3 000 packets queued in the FIFO lane.");
+        _busy = false;
+        await SafeRefreshAsync();
+    }
+
+    private IReadOnlyList<DeviceDto> _all = [];
+
+    private string NameOf(string mac) => _all.FirstOrDefault(d => d.Mac == mac)?.DisplayName ?? mac;
+
+    private static string StatusCss(DeviceDto d) =>
+        d.Status == DeviceStatus.Offline ? "is-offline" : d.Severity == Severity.Critical ? "is-critical" : d.ActiveAlerts.Count > 0 ? "is-warning" : "";
+}

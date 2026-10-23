@@ -1,0 +1,21 @@
+<span class="pill @Css" title="@Tooltip"><span class="dot"></span>@Label</span>
+
+@code {
+    [Parameter] public DeviceStatus Status { get; set; }
+    [Parameter] public Severity Severity { get; set; }
+    [Parameter] public string? Tooltip { get; set; }
+
+    private string Css => Status switch
+    {
+        DeviceStatus.Offline => "bad",
+        DeviceStatus.Stale => "warn",
+        _ => Severity switch { Severity.Critical => "bad", Severity.Warning => "warn", _ => "ok" }
+    };
+
+    private string Label => Status switch
+    {
+        DeviceStatus.Offline => "Offline",
+        DeviceStatus.Stale => "Stale",
+        _ => Severity switch { Severity.Critical => "Critical", Severity.Warning => "Warning", _ => "Healthy" }
+    };
+}

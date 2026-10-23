@@ -1,0 +1,85 @@
+@* SVG mesh: all radio links (faint), MST backbone (bold), traced route (animated toward the gateway). *@
+@if (Topology is null)
+{
+    <div class="chart-empty" style="height:420px">Loading mesh…</div>
+}
+else
+{
+    <svg class="mesh" viewBox="0 0 1000 620" role="img" aria-label="Mesh network topology">
+        <defs>
+            <radialGradient id="gwGlow"><stop offset="0%" stop-color="var(--accent)" stop-opacity=".55" /><stop offset="100%" stop-color="var(--accent)" stop-opacity="0" /></radialGradient>
+        </defs>
+        @if (ShowAllLinks)
+        {
+            @foreach (var e in Topology.Edges)
+            {
+                if (_pos.TryGetValue(e.A, out var a) && _pos.TryGetValue(e.B, out var b))
+                {
+                    <line class="link @(Down(e.A) || Down(e.B) ? "dead" : "")" x1="@F(a.X)" y1="@F(a.Y)" x2="@F(b.X)" y2="@F(b.Y)"><title>@Label(e.A) ↔ @Label(e.B) · @e.RssiDbm dBm · @e.Cost mJ</title></line>
+                }
+            }
+        }
+        @foreach (var e in Topology.MstEdges)
+        {
+            if (_pos.TryGetValue(e.A, out var a) && _pos.TryGetValue(e.B, out var b))
+            {
+                <line class="mst" x1="@F(a.X)" y1="@F(a.Y)" x2="@F(b.X)" y2="@F(b.Y)"><title>MST link · @e.Cost mJ</title></line>
+            }
+        }
+        @if (RoutePath is { Count: > 1 })
+        {
+            @for (int i = 0; i < RoutePath.Count - 1; i++)
+            {
+                if (_pos.TryGetValue(RoutePath[i], out var a) && _pos.TryGetValue(RoutePath[i + 1], out var b))
+                {
+                    <line class="route" x1="@F(a.X)" y1="@F(a.Y)" x2="@F(b.X)" y2="@F(b.Y)" />
+                }
+            }
+        }
+        @foreach (var v in Topology.Vertices)
+        {
+            var selected = v.Id == SelectedId;
+            <g class="node @(v.IsGateway ? "gateway" : "") @(v.IsOnline ? "" : "down") @(selected ? "selected" : "") @(OnRoute(v.Id) ? "onroute" : "")"
+               transform="translate(@F(v.X),@F(v.Y))" @onclick="() => OnSelect.InvokeAsync(v.Id)">
+                @if (v.IsGateway)
+                {
+                    <circle r="38" fill="url(#gwGlow)" />
+                    <rect x="-16" y="-16" width="32" height="32" rx="7" />
+                    <g><text class="gw-ico" y="5" text-anchor="middle">GW</text></g>
+                }
+                else
+                {
+                    <circle r="@(selected ? 11 : 8)" />
+                    @if (!v.IsOnline)
+                    {
+                        <path class="x" d="M-4 -4 L4 4 M4 -4 L-4 4" />
+                    }
+                }
+                <g><text class="lbl" y="@(v.IsGateway ? 32 : 22)" text-anchor="middle">@v.Label</text></g>
+                <title>@v.Label · @(v.IsOnline ? "online" : v.ForcedDown ? "simulated failure" : "offline")@(v.Hops is { } h ? $" · {h} hop(s) from gateway" : "") · @v.Zone</title>
+            </g>
+        }
+    </svg>
+}
+
+@code {
+    [Parameter] public TopologyDto? Topology { get; set; }
+    [Parameter] public IReadOnlyList<string>? RoutePath { get; set; }
+    [Parameter] public string? SelectedId { get; set; }
+    [Parameter] public bool ShowAllLinks { get; set; } = true;
+    [Parameter] public EventCallback<string> OnSelect { get; set; }
+
+    private Dictionary<string, VertexDto> _pos = [];
+    private HashSet<string> _route = [];
+
+    protected override void OnParametersSet()
+    {
+        _pos = Topology?.Vertices.ToDictionary(v => v.Id) ?? [];
+        _route = RoutePath is null ? [] : [.. RoutePath];
+    }
+
+    private bool Down(string id) => _pos.TryGetValue(id, out var v) && !v.IsOnline;
+    private bool OnRoute(string id) => _route.Contains(id);
+    private string Label(string id) => _pos.TryGetValue(id, out var v) ? v.Label : id;
+    private static string F(double d) => d.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
+}

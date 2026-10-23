@@ -1,0 +1,28 @@
+@* Visualises the jagged staging rows (T[][]) for each primitive type before they are flushed into List<T>. *@
+@if (Stats is not null)
+{
+    <div class="pipeline">
+        @foreach (var (label, rows, ledger) in new[] { ("float", Stats.FloatRows, Stats.FloatLedger), ("int", Stats.IntRows, Stats.IntLedger), ("bool", Stats.BoolRows, Stats.BoolLedger) })
+        {
+            <div class="pipe-type">
+                <div class="pipe-head"><code>TelemetryPacket&lt;@label&gt;[][]</code><span class="muted">@rows.Sum() staged</span></div>
+                <div class="pipe-rows">
+                    @for (int r = 0; r < rows.Length; r++)
+                    {
+                        var pct = Stats.RowSize == 0 ? 0 : Math.Min(100, rows[r] * 100.0 / Stats.RowSize);
+                        <div class="pipe-row" title="row[@r]: @rows[r] / @Stats.RowSize">
+                            <span class="pipe-idx">[@r]</span>
+                            <span class="pipe-bar"><i style="width:@(pct.ToString("0", System.Globalization.CultureInfo.InvariantCulture))%"></i></span>
+                        </div>
+                    }
+                </div>
+                <div class="pipe-arrow">→ <code>List&lt;TelemetryPacket&lt;@label&gt;&gt;</code> <strong>@ledger.ToString("N0")</strong></div>
+            </div>
+        }
+    </div>
+    <p class="muted small">@Stats.TotalAppended.ToString("N0") packets moved through the pipeline in @Stats.Flushes.ToString("N0") block flushes.</p>
+}
+
+@code {
+    [Parameter] public PipelineStatsDto? Stats { get; set; }
+}

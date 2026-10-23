@@ -1,0 +1,41 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Smart-X API (5080)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build",
+      "program": "${workspaceFolder}/src/SmartX.Api/bin/Debug/net10.0/SmartX.Api.dll",
+      "cwd": "${workspaceFolder}/src/SmartX.Api",
+      "env": { "ASPNETCORE_ENVIRONMENT": "Development", "ASPNETCORE_URLS": "http://localhost:5080" },
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Smart-X Web (5090)",
+      "type": "coreclr",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/SmartX.Web/bin/Debug/net10.0/SmartX.Web.dll",
+      "cwd": "${workspaceFolder}/src/SmartX.Web",
+      "env": { "ASPNETCORE_ENVIRONMENT": "Development", "ASPNETCORE_URLS": "http://localhost:5090" },
+      "serverReadyAction": { "action": "openExternally", "pattern": "Now listening on:\\s+(http://\\S+)" },
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Device simulator",
+      "type": "coreclr",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/SmartX.DeviceSimulator/bin/Debug/net10.0/SmartX.DeviceSimulator.dll",
+      "args": ["--api", "http://localhost:5080"],
+      "cwd": "${workspaceFolder}/src/SmartX.DeviceSimulator",
+      "console": "integratedTerminal"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Smart-X: API + Web + Simulator",
+      "configurations": ["Smart-X API (5080)", "Smart-X Web (5090)", "Device simulator"],
+      "stopAll": true
+    }
+  ]
+}

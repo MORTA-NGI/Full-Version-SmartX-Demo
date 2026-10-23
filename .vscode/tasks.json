@@ -1,0 +1,43 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build",
+      "type": "process",
+      "command": "dotnet",
+      "args": ["build", "${workspaceFolder}/SmartX.sln", "/property:GenerateFullPaths=true", "/consoleloggerparameters:NoSummary"],
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "run: api",
+      "type": "process",
+      "command": "dotnet",
+      "args": ["run", "--project", "${workspaceFolder}/src/SmartX.Api"],
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "run: web",
+      "type": "process",
+      "command": "dotnet",
+      "args": ["run", "--project", "${workspaceFolder}/src/SmartX.Web"],
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "run: simulator",
+      "type": "process",
+      "command": "dotnet",
+      "args": ["run", "--project", "${workspaceFolder}/src/SmartX.DeviceSimulator", "--", "--api", "http://localhost:5080"],
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "run: everything",
+      "dependsOn": ["run: api", "run: web", "run: simulator"],
+      "dependsOrder": "parallel",
+      "problemMatcher": []
+    }
+  ]
+}

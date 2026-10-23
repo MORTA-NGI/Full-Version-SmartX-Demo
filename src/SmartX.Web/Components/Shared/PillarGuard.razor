@@ -1,0 +1,38 @@
+@inject SmartXApiClient Api
+
+@if (_checked && !_enabled)
+{
+    <section class="card empty-state">
+        <div class="lock-ico">🔒</div>
+        <h1>@Title is disabled</h1>
+        <p class="muted">This pillar unlocks in @Part. Set <code>Gateway:ActivePillars</code> in the API's appsettings.json to enable it.</p>
+        <a class="btn" href="/">Back to the gateway</a>
+    </section>
+}
+else
+{
+    @ChildContent
+}
+
+@code {
+    [Parameter, EditorRequired] public string Key { get; set; } = "";
+    [Parameter] public string Title { get; set; } = "";
+    [Parameter] public string Part { get; set; } = "";
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+
+    private bool _checked, _enabled = true;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            var status = await Api.GetStatusAsync();
+            _enabled = status?.Pillars.FirstOrDefault(p => p.Key == Key)?.Enabled ?? true;
+        }
+        catch (HttpRequestException)
+        {
+            _enabled = true; // let the page show its own offline state
+        }
+        _checked = true;
+    }
+}

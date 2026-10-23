@@ -1,0 +1,638 @@
+@page "/ingestion"
+@inherits LiveComponentBase
+@inject NavigationManager Nav
+
+<PageTitle>Sensor Ingestion · Smart-X</PageTitle>
+
+<PillarGuard Key="ingestion" Title="Sensor Data Ingestion" Part="Part 1">
+    <header class="page-head">
+        <div>
+            <p class="eyebrow">Pillar 1 · Part 1</p>
+            <h1>Sensor data ingestion &amp; telemetry</h1>
+            <p class="lede">Register ESP32 sensors, attach their configuration files and logs, and catch spikes and dropouts on the live Anomaly Radar.</p>
+        </div>
+        <span class="updated">@(LastUpdatedUtc is null ? "" : $"Live · updated {TimeFormat.Clock(LastUpdatedUtc.Value)}")</span>
+    </header>
+
+    <nav class="tabs" role="tablist">
+        @foreach (var (key, label) in Tabs)
+        {
+            <button role="tab" class="tab @(Ui.IngestionTab == key ? "active" : "")" aria-selected="@(Ui.IngestionTab == key)" @onclick="() => SetTab(key)">@label</button>
+        }
+    </nav>
+
+    @switch (Ui.IngestionTab)
+    {
+        case "radar":
+            @RadarTab
+            break;
+        case "register":
+            @RegisterTab
+            break;
+        case "devices":
+            @DevicesTab
+            break;
+        default:
+            @PipelineTab
+            break;
+    }
+</PillarGuard>
+
+@code {
+    private static readonly (string Key, string Label)[] Tabs =
+    [
+        ("radar", "📡 Anomaly Radar"),
+        ("register", "➕ Register sensor"),
+        ("devices", "📋 Device registry"),
+        ("pipeline", "⚙️ Pipeline & OOP"),
+    ];
+
+    private RadarDto? _radar;
+    private DeviceSearchResultDto? _devices;
+    private PipelineStatsDto? _pipeline;
+    private DeploymentOverviewDto? _deployment;
+    private List<MetricDefinition> _metrics = [];
+
+    protected override TimeSpan RefreshInterval => TimeSpan.FromSeconds(2);
+
+    protected override async Task OnInitializedAsync()
+    {
+        _edit = new EditContext(Ui.Draft);
+        _serverErrors = new ValidationMessageStore(_edit);
+        _edit.OnFieldChanged += (_, e) => _serverErrors.Clear(e.FieldIdentifier);
+        try
+        {
+            _metrics = await Api.GetMetricsAsync(Token);
+            _deployment = await Api.GetDeploymentAsync(Token);
+            if (string.IsNullOrEmpty(Ui.Draft.Metric)) Ui.Draft.Metric = MetricsFor(Ui.Draft.Category).FirstOrDefault()?.Key ?? "";
+        }
+        catch (HttpRequestException)
+        {
+            // LiveComponentBase reports the offline state
+        }
+        await base.OnInitializedAsync();
+    }
+
+    protected override async Task RefreshAsync(CancellationToken ct)
+    {
+        switch (Ui.IngestionTab)
+        {
+            case "radar":
+                _radar = await Api.GetRadarAsync(ct);
+                break;
+            case "devices":
+                await LoadDevicesAsync(ct);
+                break;
+            case "pipeline":
+                _pipeline = await Api.GetPipelineAsync(ct);
+                _devices ??= await Api.SearchDevicesAsync(null, null, null, false, ct);
+                break;
+            case "register":
+                if (_deployment is null) _deployment = await Api.GetDeploymentAsync(ct);
+                break;
+        }
+    }
+
+    private async Task SetTab(string key)
+    {
+        Ui.IngestionTab = key;
+        await SafeRefreshAsync();
+    }
+
+    // ═══════════════════════════ RADAR TAB ═══════════════════════════
+    private ReportIssueRequest _issue = new();
+    private bool _reporting;
+
+    private RenderFragment RadarTab => @<div class="grid radar-grid">
+        <section class="card span-2">
+            <div class="card-head">
+                <div>
+                    <h2>Anomaly Radar</h2>
+                    <p class="muted">Each row is a sensor, each column 10 seconds. Colour shows how far a reading is from that sensor's own recent behaviour (rolling z-score); grey gaps mean the node went silent.</p>
+                </div>
+                @if (_radar is not null)
+                {
+                    <div class="health" style="--score:@_radar.HealthScore">
+                        <svg viewBox="0 0 36 36"><circle class="track" cx="18" cy="18" r="15.9" /><circle class="value @HealthCss(_radar.HealthScore)" cx="18" cy="18" r="15.9" stroke-dasharray="@($"{_radar.HealthScore} 100")" /></svg>
+                        <span><strong>@_radar.HealthScore</strong><small>health</small></span>
+                    </div>
+                }
+            </div>
+            <RadarHeatmap Radar="_radar" />
+        </section>
+
+        <section class="card">
+            <h2>Spike &amp; dropout feed</h2>
+            @if (_radar is null || _radar.Spikes.Count == 0)
+            {
+                <p class="muted">No anomalies yet - start the device simulator to stream live data.</p>
+            }
+            else
+            {
+                <ul class="feed">
+                    @foreach (var s in _radar.Spikes.Take(12))
+                    {
+                        <li class="feed-item @s.Kind.ToLowerInvariant()">
+                            <span class="feed-kind">@s.Kind</span>
+                            <a href="@($"/ingestion/device/{Uri.EscapeDataString(s.Mac)}")">@s.Name</a>
+                            <span class="mono">@s.Display @(s.ZScore != 0 ? $"(z {s.ZScore:0.0})" : "")</span>
+                            <time>@TimeFormat.Ago(s.AtUtc)</time>
+                        </li>
+                    }
+                </ul>
+            }
+        </section>
+
+        <section class="card span-2">
+            <div class="card-head">
+                <div>
+                    <h2>Issue triage</h2>
+                    <p class="muted">Operators log what they see; critical alerts open issues automatically. Fast acknowledgement keeps your streak alive.</p>
+                </div>
+                @if (_radar is not null)
+                {
+                    <div class="triage-stats">
+                        <div><span>MTTA</span><strong>@(_radar.MeanTimeToAcknowledgeSec == 0 ? "—" : $"{_radar.MeanTimeToAcknowledgeSec:0}s")</strong></div>
+                        <div><span>Resolved</span><strong>@_radar.ResolvedCount</strong></div>
+                        <div><span>Streak</span><strong>@_radar.TriageStreak</strong></div>
+                    </div>
+                }
+            </div>
+            @if (_radar?.Badges.Count > 0)
+            {
+                <div class="badges">@foreach (var b in _radar.Badges) { <span class="badge">@b</span> }</div>
+            }
+            <form class="issue-form" @onsubmit="ReportIssueAsync" @onsubmit:preventDefault>
+                <select @bind="_issue.Mac" aria-label="Device">
+                    <option value="">Device…</option>
+                    @foreach (var h in _radar?.Heartbeats ?? [])
+                    {
+                        <option value="@h.Mac">@h.Name</option>
+                    }
+                </select>
+                <input @bind="_issue.Title" placeholder="What's wrong? e.g. probe reading stuck at 0 %" maxlength="120" aria-label="Issue description" />
+                <select @bind="_issue.Severity" aria-label="Severity">
+                    <option value="@Severity.Warning">Warning</option>
+                    <option value="@Severity.Critical">Critical</option>
+                </select>
+                <button class="btn primary" disabled="@_reporting">Report</button>
+            </form>
+            <table class="table">
+                <thead><tr><th>#</th><th>Device</th><th>Issue</th><th>Severity</th><th>Status</th><th>Opened</th><th></th></tr></thead>
+                <tbody>
+                    @foreach (var i in _radar?.Issues ?? [])
+                    {
+                        <tr class="@(i.Status == IssueStatus.Resolved ? "dim" : "")">
+                            <td class="mono">@i.Id</td>
+                            <td>@i.DeviceName</td>
+                            <td>@i.Title <small class="muted">· @i.Source</small></td>
+                            <td><span class="pill @(i.Severity == Severity.Critical ? "bad" : "warn")">@i.Severity</span></td>
+                            <td>@i.Status</td>
+                            <td>@TimeFormat.Ago(i.CreatedUtc)</td>
+                            <td><div class="actions">
+                                @if (i.Status == IssueStatus.Open)
+                                {
+                                    <button class="btn small" @onclick="() => TransitionAsync(i.Id, false)">Acknowledge</button>
+                                }
+                                @if (i.Status != IssueStatus.Resolved)
+                                {
+                                    <button class="btn small ghost" @onclick="() => TransitionAsync(i.Id, true)">Resolve</button>
+                                }
+                            </div></td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </section>
+
+        <section class="card">
+            <h2>Heartbeats</h2>
+            <p class="muted small">Seconds since each node last reported.</p>
+            <div class="beats">
+                @foreach (var h in (_radar?.Heartbeats ?? []).OrderByDescending(h => h.SecondsSinceSeen).Take(14))
+                {
+                    <div class="beat @h.Status.ToString().ToLowerInvariant()">
+                        <span class="pulse @h.Status.ToString().ToLowerInvariant()"></span>
+                        <span>@h.Name</span>
+                        <span class="mono">@(h.SecondsSinceSeen < 0 ? "never" : $"{h.SecondsSinceSeen:0}s")</span>
+                    </div>
+                }
+            </div>
+        </section>
+    </div>;
+
+    private async Task ReportIssueAsync()
+    {
+        _reporting = true;
+        var r = await Api.ReportIssueAsync(_issue, Token);
+        _reporting = false;
+        if (r.Ok)
+        {
+            Toasts.Success($"Issue #{r.Value!.Id} logged for {r.Value.DeviceName}.");
+            _issue = new ReportIssueRequest { Mac = _issue.Mac };
+            await SafeRefreshAsync();
+        }
+        else Toasts.Error(r.Error!);
+    }
+
+    private async Task TransitionAsync(int id, bool resolve)
+    {
+        var r = await Api.TransitionIssueAsync(id, resolve, Token);
+        if (r.Ok)
+        {
+            var secs = r.Value!.AcknowledgedUtc is { } a ? (a - r.Value.CreatedUtc).TotalSeconds : 0;
+            Toasts.Success(resolve ? $"Issue #{id} resolved." : $"Issue #{id} acknowledged in {secs:0}s.");
+            await SafeRefreshAsync();
+        }
+        else Toasts.Error(r.Error!);
+    }
+
+    private static string HealthCss(int score) => score >= 85 ? "ok" : score >= 60 ? "warn" : "bad";
+
+    // ═══════════════════════════ REGISTER TAB ═══════════════════════════
+    private EditContext _edit = default!;
+    private ValidationMessageStore _serverErrors = default!;
+    private PathValidationResult? _path;
+    private RegisterSensorResponse? _registered;
+    private bool _submitting;
+    private AddDeploymentNodeRequest _newNode = new();
+
+    private RenderFragment RegisterTab => @<div class="grid two">
+        <section class="card">
+            <h2>Register a sensor</h2>
+            <EditForm EditContext="_edit" OnValidSubmit="SubmitAsync" class="form">
+                <DataAnnotationsValidator />
+                <div class="field">
+                    <label for="mac">Device MAC address</label>
+                    <div class="input-row">
+                        <InputText id="mac" class="mono" @bind-Value="Ui.Draft.Mac" placeholder="24:6F:28:1A:2B:3C" />
+                        <button type="button" class="btn ghost" @onclick="GenerateMac">Generate ESP32 MAC</button>
+                    </div>
+                    <ValidationMessage For="() => Ui.Draft.Mac" />
+                </div>
+                <div class="field">
+                    <label for="name">Display name</label>
+                    <InputText id="name" @bind-Value="Ui.Draft.DisplayName" placeholder="MOIST-D1" />
+                    <ValidationMessage For="() => Ui.Draft.DisplayName" />
+                </div>
+                <div class="field-row">
+                    <div class="field">
+                        <label for="cat">Sensor category</label>
+                        <InputSelect id="cat" @bind-Value="Ui.Draft.Category" @bind-Value:after="OnCategoryChanged">
+                            @foreach (var c in Enum.GetValues<SensorCategory>())
+                            {
+                                <option value="@c">@Pretty(c)</option>
+                            }
+                        </InputSelect>
+                    </div>
+                    <div class="field">
+                        <label for="metric">Measures</label>
+                        <InputSelect id="metric" @bind-Value="Ui.Draft.Metric">
+                            @foreach (var m in MetricsFor(Ui.Draft.Category))
+                            {
+                                <option value="@m.Key">@m.Label (@m.Kind, @m.Unit)</option>
+                            }
+                        </InputSelect>
+                        <ValidationMessage For="() => Ui.Draft.Metric" />
+                    </div>
+                </div>
+                <fieldset class="location">
+                    <legend>Deployment location</legend>
+                    <div class="field-row four">
+                        <div class="field">
+                            <label for="fac">Facility</label>
+                            <InputSelect id="fac" @bind-Value="Ui.Draft.FacilityId" @bind-Value:after="OnFacilityChanged">
+                                <option value="">Choose…</option>
+                                @foreach (var f in _deployment?.Facilities ?? [])
+                                {
+                                    <option value="@f.Id">@f.Name</option>
+                                }
+                            </InputSelect>
+                        </div>
+                        <div class="field">
+                            <label for="zone">Zone</label>
+                            <InputSelect id="zone" @bind-Value="Ui.Draft.ZoneId" @bind-Value:after="OnZoneChanged" disabled="@(Ui.Draft.FacilityId == "")">
+                                <option value="">Choose…</option>
+                                @foreach (var z in ChildrenOf(Ui.Draft.FacilityId))
+                                {
+                                    <option value="@z.Id">@z.Name</option>
+                                }
+                            </InputSelect>
+                        </div>
+                        <div class="field">
+                            <label for="sz">Sub-zone</label>
+                            <InputSelect id="sz" @bind-Value="Ui.Draft.SubZoneId" @bind-Value:after="OnSubZoneChanged" disabled="@(Ui.Draft.ZoneId == "")">
+                                <option value="">Choose…</option>
+                                @foreach (var s in ChildrenOf(Ui.Draft.ZoneId))
+                                {
+                                    <option value="@s.Id">@s.Name</option>
+                                }
+                            </InputSelect>
+                        </div>
+                        <div class="field">
+                            <label for="node">Node</label>
+                            <InputSelect id="node" @bind-Value="Ui.Draft.NodeId" @bind-Value:after="OnNodeChanged" disabled="@(Ui.Draft.SubZoneId == "")">
+                                <option value="">Choose…</option>
+                                @foreach (var n in ChildrenOf(Ui.Draft.SubZoneId))
+                                {
+                                    <option value="@n.Id">@n.Name (@n.DeviceCount sensors)</option>
+                                }
+                            </InputSelect>
+                        </div>
+                    </div>
+                    <ValidationMessage For="() => Ui.Draft.NodeId" />
+                    @if (_path is not null)
+                    {
+                        <div class="path-check @(_path.IsSafe ? "ok" : "bad")">
+                            <span>@(_path.IsSafe ? "✓ Safely configured" : "✕ Unsafe path")</span>
+                            <code>@_path.Display</code>
+                            @foreach (var p in _path.Problems)
+                            {
+                                <small>@p</small>
+                            }
+                        </div>
+                    }
+                </fieldset>
+                <div class="form-actions">
+                    <button type="submit" class="btn primary" disabled="@_submitting">@(_submitting ? "Registering…" : "Register sensor")</button>
+                    <button type="button" class="btn ghost" @onclick="ResetDraft">Clear</button>
+                </div>
+            </EditForm>
+            @if (_registered is not null)
+            {
+                <div class="banner ok">
+                    <strong>@_registered.Device.DisplayName registered</strong> at <code>@_registered.PathValidation.Display</code>.
+                    <a href="@($"/ingestion/device/{Uri.EscapeDataString(_registered.Device.Mac)}")">Attach config files, photos or logs →</a>
+                </div>
+            }
+        </section>
+
+        <section class="card">
+            <div class="card-head">
+                <div>
+                    <h2>Deployment tree</h2>
+                    <p class="muted">Validated recursively: tier order, unique ids, depth guard, and power demand vs. capacity at every level.</p>
+                </div>
+                @if (_deployment is not null)
+                {
+                    var v = _deployment.Validation;
+                    <span class="pill @(v.IsValid ? "ok" : "bad")">@(v.IsValid ? "Valid" : "Errors") · @v.NodesVisited nodes · depth @v.MaxDepthReached</span>
+                }
+            </div>
+            @if (_deployment is not null)
+            {
+                <ul class="tree">
+                    @foreach (var f in _deployment.Facilities)
+                    {
+                        @RenderNode(f)
+                    }
+                </ul>
+                @if (_deployment.Validation.Issues.Count > 0)
+                {
+                    <ul class="issues">
+                        @foreach (var i in _deployment.Validation.Issues)
+                        {
+                            <li class="@(i.IsError ? "bad" : "warn")"><strong>@(i.IsError ? "Error" : "Note")</strong> @i.Message <small class="muted">@i.Path</small></li>
+                        }
+                    </ul>
+                }
+                <form class="inline-form" @onsubmit="AddNodeAsync" @onsubmit:preventDefault>
+                    <select @bind="_newNode.ParentId" aria-label="Parent">
+                        <option value="">Add under…</option>
+                        @foreach (var (id, label) in Containers())
+                        {
+                            <option value="@id">@label</option>
+                        }
+                    </select>
+                    <input @bind="_newNode.Name" placeholder="Name e.g. Sub-Zone D" aria-label="Name" />
+                    <input type="number" @bind="_newNode.PowerWatts" min="0" step="5" aria-label="Power (W)" title="Capacity for containers, demand for a Node" />
+                    <span class="muted small">W</span>
+                    <button class="btn">Add &amp; validate</button>
+                </form>
+            }
+        </section>
+    </div>;
+
+    private RenderFragment RenderNode(DeploymentNodeDto n) => @<li class="lvl-@((int)n.Level) @(n.Enabled ? "" : "disabled")">
+        <span class="tree-node"><span class="lvl-tag">@n.Level</span>@n.Name <small class="muted">@n.PowerWatts W · @n.DeviceCount sensors</small></span>
+        @if (n.Children.Count > 0)
+        {
+            <ul>
+                @foreach (var c in n.Children)
+                {
+                    @RenderNode(c)
+                }
+            </ul>
+        }
+    </li>;
+
+    private IEnumerable<MetricDefinition> MetricsFor(SensorCategory c) => _metrics.Where(m => m.Category == c);
+
+    private IReadOnlyList<DeploymentNodeDto> ChildrenOf(string id)
+    {
+        if (string.IsNullOrEmpty(id) || _deployment is null) return [];
+        return Find(_deployment.Facilities, id)?.Children ?? [];
+    }
+
+    private static DeploymentNodeDto? Find(IEnumerable<DeploymentNodeDto> nodes, string id)
+    {
+        foreach (var n in nodes)
+        {
+            if (n.Id == id) return n;
+            var hit = Find(n.Children, id);
+            if (hit is not null) return hit;
+        }
+        return null;
+    }
+
+    private IEnumerable<(string Id, string Label)> Containers()
+    {
+        IEnumerable<(string, string)> Walk(DeploymentNodeDto n, string indent)
+        {
+            if (n.Level == DeploymentLevel.Node) yield break;
+            yield return (n.Id, $"{indent}{n.Name}");
+            foreach (var c in n.Children)
+                foreach (var x in Walk(c, indent + "— ")) yield return x;
+        }
+        return (_deployment?.Facilities ?? []).SelectMany(f => Walk(f, ""));
+    }
+
+    private void OnCategoryChanged() => Ui.Draft.Metric = MetricsFor(Ui.Draft.Category).FirstOrDefault()?.Key ?? "";
+    private void OnFacilityChanged() { Ui.Draft.ZoneId = Ui.Draft.SubZoneId = Ui.Draft.NodeId = ""; _path = null; }
+    private void OnZoneChanged() { Ui.Draft.SubZoneId = Ui.Draft.NodeId = ""; _path = null; }
+    private void OnSubZoneChanged() { Ui.Draft.NodeId = ""; _path = null; }
+
+    private async Task OnNodeChanged()
+    {
+        _path = string.IsNullOrEmpty(Ui.Draft.NodeId) ? null : await Api.ValidatePathAsync(Ui.Draft.NodeId, Token);
+    }
+
+    private void GenerateMac()
+    {
+        Ui.Draft.Mac = MacAddress.Generate(Random.Shared);
+        _edit.NotifyFieldChanged(_edit.Field(nameof(RegisterForm.Mac)));
+    }
+
+    private async Task SubmitAsync()
+    {
+        _submitting = true;
+        _serverErrors.Clear();
+        var d = Ui.Draft;
+        var result = await Api.RegisterAsync(new RegisterSensorRequest
+        {
+            Mac = d.Mac, DisplayName = d.DisplayName, Category = d.Category, Metric = d.Metric, NodeId = d.NodeId
+        }, Token);
+        _submitting = false;
+
+        if (result.Ok)
+        {
+            _registered = result.Value;
+            Toasts.Success($"{result.Value!.Device.DisplayName} registered ({result.Value.Device.Mac}).");
+            Ui.Draft = new RegisterForm { Category = d.Category, Metric = d.Metric, FacilityId = d.FacilityId, ZoneId = d.ZoneId, SubZoneId = d.SubZoneId };
+            _edit = new EditContext(Ui.Draft);
+            _serverErrors = new ValidationMessageStore(_edit);
+            _edit.OnFieldChanged += (_, e) => _serverErrors.Clear(e.FieldIdentifier);
+            _path = null;
+            _deployment = await Api.GetDeploymentAsync(Token);
+            _devices = null;
+            return;
+        }
+
+        foreach (var (field, messages) in result.FieldErrors ?? new Dictionary<string, string[]>())
+        {
+            var prop = typeof(RegisterForm).GetProperties().FirstOrDefault(p => p.Name.Equals(field, StringComparison.OrdinalIgnoreCase))?.Name;
+            if (prop is not null) _serverErrors.Add(_edit.Field(prop), messages);
+        }
+        _edit.NotifyValidationStateChanged();
+        Toasts.Error(result.Error ?? "Registration failed.");
+    }
+
+    private void ResetDraft()
+    {
+        Ui.Draft = new RegisterForm { Metric = MetricsFor(SensorCategory.Environmental).FirstOrDefault()?.Key ?? "" };
+        _edit = new EditContext(Ui.Draft);
+        _serverErrors = new ValidationMessageStore(_edit);
+        _edit.OnFieldChanged += (_, e) => _serverErrors.Clear(e.FieldIdentifier);
+        _path = null;
+        _registered = null;
+    }
+
+    private async Task AddNodeAsync()
+    {
+        var r = await Api.AddDeploymentNodeAsync(_newNode, Token);
+        if (!r.Ok)
+        {
+            Toasts.Error(r.Error!);
+            return;
+        }
+        _deployment = r.Value;
+        var v = r.Value!.Validation;
+        if (v.IsValid) Toasts.Success($"'{_newNode.Name}' added - tree re-validated recursively ({v.NodesVisited} nodes).");
+        else Toasts.Warn($"'{_newNode.Name}' added, but validation found {v.Issues.Count(i => i.IsError)} error(s) - see below.");
+        _newNode = new AddDeploymentNodeRequest { ParentId = _newNode.ParentId };
+    }
+
+    private static string Pretty(SensorCategory c) => c switch
+    {
+        SensorCategory.PowerConsumption => "Power consumption",
+        _ => c.ToString()
+    };
+
+    // ═══════════════════════════ DEVICES TAB ═══════════════════════════
+    private RenderFragment DevicesTab => @<section class="card">
+        <div class="card-head">
+            <h2>Device registry</h2>
+            <div class="filters">
+                <input type="search" placeholder="Search name, MAC or location…" @bind="Ui.DeviceSearch" @bind:event="oninput" @bind:after="ReloadDevices" aria-label="Search devices" />
+                <select @bind="Ui.DeviceCategory" @bind:after="ReloadDevices" aria-label="Category">
+                    <option value="">All categories</option>
+                    @foreach (var c in Enum.GetValues<SensorCategory>())
+                    {
+                        <option value="@c">@Pretty(c)</option>
+                    }
+                </select>
+            </div>
+        </div>
+        @if (_devices is null)
+        {
+            <p class="muted">Loading…</p>
+        }
+        else
+        {
+            <p class="muted small">@_devices.Total device(s) · Dictionary lookup + filter in @_devices.ElapsedMs ms</p>
+            <div class="table-wrap">
+                <table class="table hover">
+                    <thead><tr><th>Name</th><th>MAC</th><th>Category</th><th>Location</th><th>Status</th><th class="num">Last value</th><th>Seen</th><th>Files</th></tr></thead>
+                    <tbody>
+                        @foreach (var d in _devices.Devices)
+                        {
+                            <tr @onclick="() => OpenDevice(d.Mac)" class="clickable">
+                                <td><strong>@d.DisplayName</strong><br /><small class="muted">@d.MetricLabel</small></td>
+                                <td class="mono">@d.Mac</td>
+                                <td>@Pretty(d.Category)</td>
+                                <td><small>@d.Zone</small></td>
+                                <td><StatusPill Status="d.Status" Severity="d.Severity" /></td>
+                                <td class="num mono">@d.LastDisplay <small class="muted">@d.Unit</small></td>
+                                <td>@TimeFormat.Ago(d.LastSeenUtc)</td>
+                                <td class="num">@(d.AttachmentCount > 0 ? $"📎 {d.AttachmentCount}" : "—")</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </section>;
+
+    private async Task LoadDevicesAsync(CancellationToken ct) =>
+        _devices = await Api.SearchDevicesAsync(Ui.DeviceSearch, Ui.DeviceCategory, null, false, ct);
+
+    private async Task ReloadDevices() => await SafeRefreshAsync();
+
+    private void OpenDevice(string mac) => Nav.NavigateTo($"/ingestion/device/{Uri.EscapeDataString(mac)}");
+
+    // ═══════════════════════════ PIPELINE & OOP TAB ═══════════════════════════
+    private AggregateDto? _agg;
+
+    private RenderFragment PipelineTab => @<div class="grid two">
+        <section class="card">
+            <h2>Ingestion pipeline (jagged arrays → List&lt;T&gt;)</h2>
+            <p class="muted">Each primitive type has its own <code>TelemetryPacket&lt;T&gt;</code> store, so float, int and bool readings are never boxed. Packets are staged in reusable jagged rows and block-copied into a bounded <code>List&lt;T&gt;</code> ledger when the rows fill.</p>
+            <PipelineVisual Stats="_pipeline" />
+        </section>
+        <section class="card">
+            <h2>Operator overloading on live meters</h2>
+            <p class="muted">Pick two smart meters - the API builds <code>SmartMeterReading</code> structs and evaluates <code>meter1 + meter2</code>, <code>meter1 - meter2</code>, <code>meter3 / 2</code> and <code>meter1 &gt; meter2</code>.</p>
+            <div class="inline-form">
+                <select @bind="Ui.AggregateA" aria-label="Meter 1">
+                    <option value="">Meter 1…</option>
+                    @foreach (var m in Meters) { <option value="@m.Mac">@m.DisplayName</option> }
+                </select>
+                <span class="op">+</span>
+                <select @bind="Ui.AggregateB" aria-label="Meter 2">
+                    <option value="">Meter 2…</option>
+                    @foreach (var m in Meters) { <option value="@m.Mac">@m.DisplayName</option> }
+                </select>
+                <button class="btn primary" @onclick="AggregateAsync" disabled="@(string.IsNullOrEmpty(Ui.AggregateA) || string.IsNullOrEmpty(Ui.AggregateB))">Aggregate</button>
+            </div>
+            @if (_agg is not null)
+            {
+                <pre class="code"><span class="c">// SmartX.Core.Telemetry.SmartMeterReading</span>
+var meter3 = meter1 + meter2;   <span class="c">// @_agg.Sum.Watts W  (@_agg.Sum.KilowattHours kWh / 24 h, @_agg.Sum.Sources meters)</span>
+var delta  = meter1 - meter2;   <span class="c">// @_agg.Delta.Watts W</span>
+var avg    = meter3 / 2;        <span class="c">// @_agg.AveragePerMeter.Watts W per meter</span>
+bool aHigher = meter1 &gt; meter2; <span class="c">// @_agg.AIsHigher.ToString().ToLowerInvariant()</span>
+bool trip  = meter3 &gt; 3500;     <span class="c">// @_agg.SumOverBreakerLimit.ToString().ToLowerInvariant()</span></pre>
+                <p class="mono small">@_agg.Expression</p>
+            }
+        </section>
+    </div>;
+
+    private IEnumerable<DeviceDto> Meters => (_devices?.Devices ?? []).Where(d => d.Metric == "power_w");
+
+    private async Task AggregateAsync()
+    {
+        var r = await Api.AggregateAsync(Ui.AggregateA!, Ui.AggregateB!, Token);
+        if (r.Ok) _agg = r.Value;
+        else Toasts.Error(r.Error!);
+    }
+}

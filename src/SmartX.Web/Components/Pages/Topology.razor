@@ -1,0 +1,302 @@
+@page "/topology"
+@inherits LiveComponentBase
+
+<PageTitle>Network Topology · Smart-X</PageTitle>
+
+<PillarGuard Key="topology" Title="Network Topology & Mesh Routing" Part="the final PoE">
+    <header class="page-head">
+        <div>
+            <p class="eyebrow">Pillar 3 · PoE</p>
+            <h1>Network topology &amp; mesh routing</h1>
+            <p class="lede">Each ESP32 is a vertex and each radio link an edge weighted by transmit energy. Prim's algorithm finds the most power-efficient backbone; BFS shows who can still reach the gateway when nodes fail.</p>
+        </div>
+        <div class="segmented">
+            @foreach (var f in _topo?.Facilities ?? [])
+            {
+                <button class="@(f.Id == _topo?.Vertices.FirstOrDefault(v => v.IsGateway)?.Id.Replace("GW-", "") ? "active" : "")" @onclick="() => SetFacility(f.Id)">@f.Name.Split('·')[0].Trim()</button>
+            }
+        </div>
+    </header>
+
+    @if (_topo is not null)
+    {
+        var saving = _topo.FullMeshCost <= 0 ? 0 : 100 - _topo.MstCost / _topo.FullMeshCost * 100;
+        <section class="kpis">
+            <div class="kpi"><span>Vertices · edges</span><strong>@_topo.Vertices.Count <small>·</small> @_topo.Edges.Count</strong><small>adjacency list</small></div>
+            <div class="kpi"><span>Reachable from gateway (BFS)</span><strong>@_topo.Reachable<small>/@(_topo.Vertices.Count - 1)</small></strong><small>@_topo.Offline.Count offline · @_topo.UnreachableOnline.Count isolated</small></div>
+            <div class="kpi accent"><span>MST energy (Prim's)</span><strong>@_topo.MstCost.ToString("0.#")<small> mJ</small></strong><small>@saving.ToString("0")% less than using every link (@_topo.FullMeshCost.ToString("0") mJ)</small></div>
+            <div class="kpi"><span>Islands (DFS components)</span><strong>@_topo.Components.Count</strong><small>computed in @_topo.ComputeMs ms</small></div>
+        </section>
+    }
+
+    <div class="grid topo-grid">
+        <section class="card span-2 map-card">
+            <div class="card-head">
+                <form class="filters" @onsubmit="TraceAsync" @onsubmit:preventDefault>
+                    <input type="search" placeholder="Trace a node by name or MAC…" @bind="Ui.RouteQuery" aria-label="Node to trace" />
+                    <button class="btn primary">Trace route</button>
+                </form>
+                <div class="inline-form">
+                    <label class="check"><input type="checkbox" @bind="_showAll" /> all links</label>
+                    @if (_route is not null)
+                    {
+                        <button class="btn small danger" @onclick="FailNextHopAsync" disabled="@(_route.Mst.Path.Count < 3)" title="Power off the first relay on this route">Fail next hop</button>
+                        <button class="btn small" @onclick="() => ToggleAsync(_route.Target)">Toggle @_route.TargetLabel</button>
+                    }
+                </div>
+            </div>
+            <MeshMap Topology="_topo" RoutePath="_route?.Mst.Path" SelectedId="_route?.Target" ShowAllLinks="_showAll" OnSelect="OnNodeClicked" />
+            <div class="legend">
+                <span><i class="sw mst"></i>MST backbone</span>
+                <span><i class="sw route"></i>Traced route (telemetry → gateway)</span>
+                <span><i class="sw link"></i>Radio link</span>
+                <span><i class="dot-sw down"></i>Offline / failed</span>
+            </div>
+        </section>
+
+        <section class="card">
+            <h2>Route</h2>
+            @if (_route is null)
+            {
+                <p class="muted">Click a node or search by MAC to trace how its packets hop to the gateway.</p>
+            }
+            else
+            {
+                <p class="mono small">@_route.Target</p>
+                @if (_route.Mst.Found)
+                {
+                    <ol class="hops">
+                        @for (int i = 0; i < _route.PathLabels.Count; i++)
+                        {
+                            <li class="@(i == 0 ? "src" : i == _route.PathLabels.Count - 1 ? "dst" : "")">@_route.PathLabels[i]</li>
+                        }
+                    </ol>
+                }
+                else
+                {
+                    <div class="banner bad">@_route.Mst.Message</div>
+                }
+                <table class="table compact">
+                    <thead><tr><th>Strategy</th><th class="num">Hops</th><th class="num">Energy</th></tr></thead>
+                    <tbody>
+                        <tr><td>MST path (Prim's)</td><td class="num">@Hops(_route.Mst)</td><td class="num">@Cost(_route.Mst)</td></tr>
+                        <tr><td>Fewest hops (BFS)</td><td class="num">@Hops(_route.FewestHops)</td><td class="num">@Cost(_route.FewestHops)</td></tr>
+                        <tr><td>Cheapest energy (Dijkstra)</td><td class="num">@Hops(_route.CheapestEnergy)</td><td class="num">@Cost(_route.CheapestEnergy)</td></tr>
+                    </tbody>
+                </table>
+                <p class="muted small">The MST is the cheapest <em>shared</em> backbone for the whole mesh; Dijkstra is the cheapest path for this one node. BFS minimises hops (latency).</p>
+            }
+
+            <h3 class="sub">Self-healing</h3>
+            @if ((_topo?.Healing.Count ?? 0) == 0)
+            {
+                <p class="muted small">No failed nodes. Use "Fail next hop" to watch the mesh re-route.</p>
+            }
+            else
+            {
+                <ul class="healing">
+                    @foreach (var heal in _topo!.Healing)
+                    {
+                        <li>
+                            <strong>✕ @heal.DownLabel</strong>
+                            @if (heal.SuggestedHops.Count == 0)
+                            {
+                                <small class="muted">No neighbour depended on it.</small>
+                            }
+                            @foreach (var s in heal.SuggestedHops)
+                            {
+                                <small>↪ @s</small>
+                            }
+                        </li>
+                    }
+                </ul>
+            }
+        </section>
+
+        <section class="card">
+            <h2>BFS from the gateway</h2>
+            <p class="muted small">Visit order = hop distance. Offline nodes are skipped, so anything behind them disappears from this list until the mesh finds a new path.</p>
+            <ol class="bfs">
+                @foreach (var id in (_topo?.BfsOrder ?? []).Take(40))
+                {
+                    var v = _topo!.Vertices.FirstOrDefault(x => x.Id == id);
+                    if (v is null) continue;
+                    <li><span class="hop">@(v.Hops ?? 0)</span>@v.Label</li>
+                }
+            </ol>
+            @if (_topo?.Offline.Count > 0)
+            {
+                <h3 class="sub">Down</h3>
+                <div class="chips">@foreach (var id in _topo.Offline) { <button class="chip bad" @onclick="() => ToggleIfForced(id)" title="Click to restore if it was a simulated failure">@Label(id)</button> }</div>
+            }
+            @if (_topo?.UnreachableOnline.Count > 0)
+            {
+                <h3 class="sub">Online but cut off</h3>
+                <div class="chips">@foreach (var id in _topo.UnreachableOnline) { <span class="chip warn">@Label(id)</span> }</div>
+            }
+        </section>
+
+        <section class="card span-2">
+            <div class="card-head">
+                <div>
+                    <h2>Historical telemetry (AVL tree range query)</h2>
+                    <p class="muted small">Each sensor's archive is an AVL tree keyed by timestamp. A range query only descends into subtrees that overlap the window - O(log n + k) instead of scanning the whole history. Times are SAST (UTC+2).</p>
+                </div>
+            </div>
+            <form class="history-form" @onsubmit="QueryHistoryAsync" @onsubmit:preventDefault>
+                <select @bind="Ui.HistoryMac" aria-label="Sensor">
+                    <option value="">Sensor…</option>
+                    @foreach (var v in (_topo?.Vertices ?? []).Where(v => !v.IsGateway).OrderBy(v => v.Label))
+                    {
+                        <option value="@v.Id">@v.Label</option>
+                    }
+                </select>
+                <label>From <input type="datetime-local" @bind="Ui.HistoryFromSast" /></label>
+                <label>To <input type="datetime-local" @bind="Ui.HistoryToSast" /></label>
+                <button class="btn primary" disabled="@string.IsNullOrEmpty(Ui.HistoryMac)">Query</button>
+                <div class="quick">
+                    <button type="button" class="chip" @onclick="() => QuickRange(1)">Last 1 h</button>
+                    <button type="button" class="chip" @onclick="() => QuickRange(6)">Last 6 h</button>
+                    <button type="button" class="chip" @onclick="() => QuickRange(24)">Last 24 h</button>
+                    <button type="button" class="chip" @onclick="() => Window(0)">Today 14:00–16:00</button>
+                    <button type="button" class="chip" @onclick="() => Window(-1)">Yesterday 14:00–16:00</button>
+                </div>
+            </form>
+            @if (Ui.LastHistory is { } h)
+            {
+                <div class="kpis compact">
+                    <div class="kpi"><span>Readings in range</span><strong>@h.Count.ToString("N0")</strong></div>
+                    <div class="kpi accent"><span>Tree nodes visited</span><strong>@h.NodesVisited.ToString("N0")<small> / @h.TreeSize.ToString("N0")</small></strong><small>@(h.TreeSize == 0 ? "" : $"{100.0 * h.NodesVisited / h.TreeSize:0.#}% of the tree touched")</small></div>
+                    <div class="kpi"><span>Tree height · rotations</span><strong>@h.TreeHeight <small>·</small> @h.Rotations.ToString("N0")</strong><small>log₂(n) ≈ @(h.TreeSize > 0 ? Math.Log2(h.TreeSize).ToString("0.0") : "0")</small></div>
+                    <div class="kpi"><span>Query time</span><strong>@h.ElapsedMicroseconds.ToString("N0")<small> µs</small></strong></div>
+                    <div class="kpi"><span>Min · avg · max</span><strong>@(h.Min?.ToString("0.#") ?? "—") · @(h.Average?.ToString("0.#") ?? "—") · @(h.Max?.ToString("0.#") ?? "—")</strong><small>@h.Unit</small></div>
+                </div>
+                <LineChart Points="h.Chart" Unit="@h.Unit" Height="220" EmptyText="No readings in this window." />
+                <details>
+                    <summary>Show @Math.Min(h.Rows.Count, 500) raw rows</summary>
+                    <div class="table-wrap tall">
+                        <table class="table compact">
+                            <thead><tr><th>Time (SAST)</th><th class="num">Value</th></tr></thead>
+                            <tbody>
+                                @foreach (var r in h.Rows.AsEnumerable().Reverse())
+                                {
+                                    <tr><td class="mono">@TimeFormat.ToSast(r.T).ToString("yyyy-MM-dd HH:mm:ss")</td><td class="num mono">@r.V @h.Unit</td></tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </details>
+            }
+        </section>
+    </div>
+</PillarGuard>
+
+@code {
+    private TopologyDto? _topo;
+    private RouteDto? _route;
+    private bool _showAll = true;
+
+    protected override TimeSpan RefreshInterval => TimeSpan.FromSeconds(3);
+
+    protected override async Task RefreshAsync(CancellationToken ct)
+    {
+        _topo = await Api.GetTopologyAsync(Ui.Facility, ct);
+        Ui.Facility ??= _topo?.GatewayId.Replace("GW-", "");
+        _route = Ui.LastRoute;
+        if (!string.IsNullOrWhiteSpace(Ui.RouteQuery) && _route is not null)
+        {
+            var r = await Api.GetRouteAsync(_route.Target, ct); // keep the trace live as nodes fail / recover
+            if (r.Ok) Ui.LastRoute = _route = r.Value;
+        }
+    }
+
+    private async Task SetFacility(string id)
+    {
+        Ui.Facility = id;
+        Ui.LastRoute = _route = null;
+        Ui.RouteQuery = "";
+        await SafeRefreshAsync();
+    }
+
+    private async Task TraceAsync()
+    {
+        if (string.IsNullOrWhiteSpace(Ui.RouteQuery)) return;
+        var r = await Api.GetRouteAsync(Ui.RouteQuery, Token);
+        if (!r.Ok)
+        {
+            Toasts.Error(r.Error!);
+            return;
+        }
+        Ui.LastRoute = _route = r.Value;
+        Ui.HistoryMac ??= r.Value!.Target;
+        var gw = _topo?.GatewayId;
+        var targetFacility = r.Value!.Mst.Path.LastOrDefault() ?? r.Value.FewestHops.Path.LastOrDefault();
+        if (targetFacility is not null && targetFacility.StartsWith("GW-") && targetFacility != gw)
+        {
+            Ui.Facility = targetFacility.Replace("GW-", "");
+            await SafeRefreshAsync();
+        }
+    }
+
+    private async Task OnNodeClicked(string id)
+    {
+        var v = _topo?.Vertices.FirstOrDefault(x => x.Id == id);
+        if (v is null || v.IsGateway) return;
+        Ui.RouteQuery = v.Label;
+        Ui.HistoryMac = v.Id;
+        await TraceAsync();
+    }
+
+    private async Task ToggleAsync(string mac)
+    {
+        await Api.ToggleNodeAsync(mac, Token);
+        Toasts.Info($"{Label(mac)} toggled - recalculating MST and BFS…");
+        await SafeRefreshAsync();
+    }
+
+    private async Task FailNextHopAsync()
+    {
+        if (_route is null || _route.Mst.Path.Count < 3) return;
+        var hop = _route.Mst.Path[1];
+        await Api.ToggleNodeAsync(hop, Token);
+        Toasts.Warn($"Simulated failure on {Label(hop)}. The mesh re-routes around it.");
+        await SafeRefreshAsync();
+    }
+
+    private async Task ToggleIfForced(string id)
+    {
+        if (_topo?.Vertices.FirstOrDefault(v => v.Id == id)?.ForcedDown == true) await ToggleAsync(id);
+        else Toasts.Info($"{Label(id)} is genuinely offline (no packets) - it recovers when the device reports again.");
+    }
+
+    private void QuickRange(int hours)
+    {
+        Ui.HistoryToSast = TimeFormat.ToSast(DateTime.UtcNow);
+        Ui.HistoryFromSast = Ui.HistoryToSast.AddHours(-hours);
+    }
+
+    private void Window(int dayOffset)
+    {
+        var day = TimeFormat.ToSast(DateTime.UtcNow).Date.AddDays(dayOffset);
+        Ui.HistoryFromSast = day.AddHours(14);
+        Ui.HistoryToSast = day.AddHours(16);
+    }
+
+    private async Task QueryHistoryAsync()
+    {
+        if (string.IsNullOrEmpty(Ui.HistoryMac)) return;
+        try
+        {
+            Ui.LastHistory = await Api.GetHistoryAsync(Ui.HistoryMac, TimeFormat.FromSast(Ui.HistoryFromSast), TimeFormat.FromSast(Ui.HistoryToSast), Token);
+            if (Ui.LastHistory is { Count: 0 }) Toasts.Info("No readings in that window - try a range within the last 48 hours.");
+        }
+        catch (HttpRequestException ex)
+        {
+            Toasts.Error($"History query failed: {ex.Message}");
+        }
+    }
+
+    private string Label(string id) => _topo?.Vertices.FirstOrDefault(v => v.Id == id)?.Label ?? id;
+    private static string Hops(RouteResult r) => r.Found ? r.Hops.ToString() : "—";
+    private static string Cost(RouteResult r) => r.Found ? $"{r.Cost:0.#} mJ" : "unreachable";
+}

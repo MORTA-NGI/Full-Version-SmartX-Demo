@@ -1,0 +1,188 @@
+@page "/ingestion/device/{Mac}"
+@inherits LiveComponentBase
+
+<PageTitle>@(_device?.DisplayName ?? "Device") · Smart-X</PageTitle>
+
+<a class="back" href="/ingestion">← Sensor ingestion</a>
+
+@if (_device is null)
+{
+    <section class="card empty-state">
+        @if (Loading) { <p class="muted">Loading sensor profile…</p> }
+        else
+        {
+            <h1>Sensor not found</h1>
+            <p class="muted">No registered device has the MAC <code>@Mac</code>.</p>
+        }
+    </section>
+}
+else
+{
+    <header class="page-head">
+        <div>
+            <p class="eyebrow">@_device.Category · @_device.MetricLabel</p>
+            <h1>@_device.DisplayName <StatusPill Status="_device.Status" Severity="_device.Severity" /></h1>
+            <p class="lede mono">@_device.Mac</p>
+            <p class="muted">@_device.LocationPath</p>
+        </div>
+        <div class="kpis compact">
+            <div class="kpi"><span>Last reading</span><strong>@_device.LastDisplay <small>@_device.Unit</small></strong></div>
+            <div class="kpi"><span>Last seen</span><strong>@TimeFormat.Ago(_device.LastSeenUtc)</strong></div>
+            <div class="kpi"><span>Anomaly score</span><strong>@_device.AnomalyScore.ToString("0.00")</strong></div>
+            @if (_device.ActuatorOn is not null)
+            {
+                <div class="kpi"><span>Desired state</span><strong>@(_device.ActuatorOn == true ? "ON" : "OFF")</strong></div>
+            }
+        </div>
+    </header>
+
+    @if (_device.ActiveAlerts.Count > 0)
+    {
+        <div class="banner warn">Active alerts: @string.Join(", ", _device.ActiveAlerts.Select(a => a.Replace('_', ' ')))</div>
+    }
+
+    <div class="grid two">
+        <section class="card span-2">
+            <div class="card-head">
+                <h2>Live telemetry (last @_minutes min)</h2>
+                <div class="segmented">
+                    @foreach (var m in new[] { 2, 5, 10, 15 })
+                    {
+                        <button class="@(m == _minutes ? "active" : "")" @onclick="() => SetMinutes(m)">@(m)m</button>
+                    }
+                </div>
+            </div>
+            <LineChart Points="_timeline?.Points" NormalMin="_timeline?.NormalMin" NormalMax="_timeline?.NormalMax" Unit="@_device.Unit" Height="240"
+                       EmptyText="Waiting for live packets - start the device simulator." />
+            <p class="muted small">Shaded band = normal operating range. Points come from the device's <code>SortedDictionary&lt;DateTime, double&gt;</code> timeline, already in timestamp order.</p>
+        </section>
+
+        <section class="card">
+            <h2>Attach files to this sensor</h2>
+            <p class="muted">Configuration files (.json, .yaml, .cfg, .ini, .bin), deployment photos (.jpg, .png, .webp) or hardware logs (.log, .txt, .csv). Max 15 MB each. Files are streamed to the API and encrypted at rest with AES-256-GCM. JSON configs are validated recursively.</p>
+            <label class="dropzone @(_uploading ? "busy" : "")">
+                <InputFile OnChange="UploadAsync" multiple accept=".json,.yaml,.yml,.cfg,.ini,.bin,.jpg,.jpeg,.png,.webp,.log,.txt,.csv" disabled="@_uploading" />
+                <span class="dz-ico">⇪</span>
+                <strong>@(_uploading ? $"Uploading {_uploadName}…" : "Drop files here or click to browse")</strong>
+                <small class="muted">Multipart upload · streamed · encrypted</small>
+            </label>
+            @if (_uploadErrors.Count > 0)
+            {
+                <ul class="issues">@foreach (var e in _uploadErrors) { <li class="bad">@e</li> }</ul>
+            }
+        </section>
+
+        <section class="card">
+            <h2>Attachments <small class="muted">(@_attachments.Count)</small></h2>
+            @if (_attachments.Count == 0)
+            {
+                <p class="muted">No files yet.</p>
+            }
+            <ul class="files">
+                @foreach (var a in _attachments)
+                {
+                    <li class="file">
+                        <span class="file-ico">@(a.Kind switch { AttachmentKind.Photo => "🖼️", AttachmentKind.Config => "⚙️", _ => "📄" })</span>
+                        <div class="file-body">
+                            <a href="@($"/files/{Uri.EscapeDataString(a.Mac)}/{a.Id}")" target="_blank" rel="noopener"><strong>@a.FileName</strong></a>
+                            <small class="muted">@a.Kind · @TimeFormat.Bytes(a.SizeBytes) · @TimeFormat.Ago(a.UploadedUtc)</small>
+                            <small class="mono muted" title="SHA-256 of the original file">sha256 @a.Sha256[..16]…</small>
+                            <span class="pill ok tiny">🔐 @a.Encryption</span>
+                            @if (a.ConfigValidation is { } cv)
+                            {
+                                <div class="path-check @(cv.IsValid ? "ok" : "bad")">
+                                    <span>@(cv.IsValid ? "✓ Config profile valid" : "✕ Config profile has problems") · @cv.ElementsVisited elements, depth @cv.MaxDepthReached</span>
+                                    @foreach (var i in cv.Issues) { <small>@i</small> }
+                                </div>
+                            }
+                            @if (a.Kind == AttachmentKind.Photo)
+                            {
+                                <img class="thumb" src="@($"/files/{Uri.EscapeDataString(a.Mac)}/{a.Id}")" alt="Deployment photo @a.FileName" loading="lazy" />
+                            }
+                        </div>
+                        <button class="btn small ghost" title="Delete" @onclick="() => DeleteAsync(a)">Delete</button>
+                    </li>
+                }
+            </ul>
+        </section>
+    </div>
+}
+
+@code {
+    [Parameter] public string Mac { get; set; } = "";
+
+    private DeviceDto? _device;
+    private DeviceTimelineDto? _timeline;
+    private List<AttachmentDto> _attachments = [];
+    private int _minutes = 5;
+    private bool _uploading;
+    private string _uploadName = "";
+    private List<string> _uploadErrors = [];
+    private bool _inspected;
+
+    private const long MaxUpload = 15 * 1024 * 1024;
+
+    protected override TimeSpan RefreshInterval => TimeSpan.FromSeconds(2);
+
+    protected override async Task RefreshAsync(CancellationToken ct)
+    {
+        _device = await Api.GetDeviceAsync(Mac, ct);
+        if (_device is null) return;
+        _timeline = await Api.GetTimelineAsync(_device.Mac, _minutes, ct);
+        if (!_inspected)
+        {
+            _inspected = true;
+            _attachments = await Api.GetAttachmentsAsync(_device.Mac, ct);
+            await Api.InspectAsync(_device.Mac, ct); // feeds the predictive engine's sequence model
+        }
+    }
+
+    private async Task SetMinutes(int m)
+    {
+        _minutes = m;
+        await SafeRefreshAsync();
+    }
+
+    private async Task UploadAsync(InputFileChangeEventArgs e)
+    {
+        if (_device is null) return;
+        _uploadErrors = [];
+        var files = e.GetMultipleFiles(10);
+        _uploading = true;
+        int saved = 0;
+        foreach (var f in files)
+        {
+            if (f.Size > MaxUpload)
+            {
+                _uploadErrors.Add($"{f.Name}: larger than 15 MB.");
+                continue;
+            }
+            _uploadName = f.Name;
+            StateHasChanged();
+            await using var stream = f.OpenReadStream(MaxUpload, Token);
+            var r = await Api.UploadAsync(_device.Mac, [(f.Name, f.ContentType, stream)], Token);
+            if (r.Ok)
+            {
+                saved += r.Value!.Saved.Count;
+                _uploadErrors.AddRange(r.Value.Rejected);
+                foreach (var s in r.Value.Saved.Where(s => s.ConfigValidation is { IsValid: false }))
+                    Toasts.Warn($"{s.FileName} uploaded, but the config profile has {s.ConfigValidation!.Issues.Count} problem(s).");
+            }
+            else
+            {
+                _uploadErrors.Add($"{f.Name}: {r.Error}");
+            }
+        }
+        _uploading = false;
+        if (saved > 0) Toasts.Success($"{saved} file(s) encrypted and attached to {_device.DisplayName}.");
+        if (_uploadErrors.Count > 0) Toasts.Error($"{_uploadErrors.Count} file(s) rejected.");
+        _attachments = await Api.GetAttachmentsAsync(_device.Mac, Token);
+    }
+
+    private async Task DeleteAsync(AttachmentDto a)
+    {
+        await Api.DeleteAttachmentAsync(a.Mac, a.Id, Token);
+        _attachments.RemoveAll(x => x.Id == a.Id);
+        Toasts.Info($"{a.FileName} deleted.");
+    }
+}

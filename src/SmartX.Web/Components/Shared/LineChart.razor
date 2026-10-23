@@ -1,0 +1,109 @@
+@* Lightweight SVG line chart (no JS chart library needed). Renders a normal-range band, axes and point tooltips. *@
+<div class="chart @(Compact ? "compact" : "")">
+    @if (Points is null || Points.Count < 2)
+    {
+        <div class="chart-empty" style="height:@(Height)px">@(Points is null ? "Loading…" : EmptyText)</div>
+    }
+    else
+    {
+        <svg viewBox="0 0 @W @Height" preserveAspectRatio="none" role="img" aria-label="@AriaLabel" style="height:@(Height)px">
+            @if (NormalMin is not null && NormalMax is not null)
+            {
+                var top = Y(Math.Min(NormalMax.Value, _max));
+                var bottom = Y(Math.Max(NormalMin.Value, _min));
+                if (bottom > top)
+                {
+                    <rect class="band" x="@Pl" y="@F(top)" width="@(W - Pl - Pr)" height="@F(bottom - top)" />
+                }
+            }
+            @if (!Compact)
+            {
+                @foreach (var t in _yTicks)
+                {
+                    <g>
+                        <line class="grid" x1="@Pl" x2="@(W - Pr)" y1="@F(Y(t))" y2="@F(Y(t))" />
+                        <text class="axis" x="@(Pl - 6)" y="@F(Y(t) + 4)" text-anchor="end">@t.ToString(_tickFormat)</text>
+                    </g>
+                }
+                @foreach (var (x, label) in _xTicks)
+                {
+                    <g><text class="axis" x="@F(x)" y="@(Height - 6)" text-anchor="middle">@label</text></g>
+                }
+            }
+            <path class="area" d="@_area" />
+            <path class="line" d="@_line" />
+            @if (!Compact && Points.Count <= 240)
+            {
+                @foreach (var p in Points)
+                {
+                    <circle class="hit" cx="@F(X(p.T))" cy="@F(Y(p.V))" r="4"><title>@TimeFormat.ToSast(p.T).ToString("dd MMM HH:mm:ss") · @p.V.ToString("0.##") @Unit</title></circle>
+                }
+            }
+            @{ var last = Points[^1]; }
+            <circle class="last" cx="@F(X(last.T))" cy="@F(Y(last.V))" r="@(Compact ? 2.5 : 4)" />
+        </svg>
+    }
+</div>
+
+@code {
+    [Parameter] public IReadOnlyList<TimelinePointDto>? Points { get; set; }
+    [Parameter] public double? NormalMin { get; set; }
+    [Parameter] public double? NormalMax { get; set; }
+    [Parameter] public string Unit { get; set; } = "";
+    [Parameter] public int Height { get; set; } = 220;
+    [Parameter] public bool Compact { get; set; }
+    [Parameter] public string EmptyText { get; set; } = "Not enough data yet";
+    [Parameter] public string AriaLabel { get; set; } = "Telemetry chart";
+
+    private const double W = 800;
+    private double Pl => Compact ? 2 : 46;
+    private double Pr => Compact ? 2 : 12;
+    private double Pt => Compact ? 3 : 12;
+    private double Pb => Compact ? 3 : 26;
+
+    private double _min, _max;
+    private long _t0, _t1;
+    private string _line = "", _area = "", _tickFormat = "0";
+    private List<double> _yTicks = [];
+    private List<(double X, string Label)> _xTicks = [];
+
+    protected override void OnParametersSet()
+    {
+        if (Points is null || Points.Count < 2) return;
+        _min = Points.Min(p => p.V);
+        _max = Points.Max(p => p.V);
+        if (NormalMin is not null && NormalMax is not null && !Compact)
+        {
+            _min = Math.Min(_min, NormalMin.Value);
+            _max = Math.Max(_max, NormalMax.Value);
+        }
+        if (Math.Abs(_max - _min) < 1e-6) { _max += 1; _min -= 1; }
+        double pad = (_max - _min) * 0.08;
+        _max += pad;
+        _min -= pad;
+        _t0 = Points[0].T.Ticks;
+        _t1 = Math.Max(Points[^1].T.Ticks, _t0 + 1);
+
+        var sb = new System.Text.StringBuilder();
+        for (int i = 0; i < Points.Count; i++)
+            sb.Append(i == 0 ? 'M' : 'L').Append(F(X(Points[i].T))).Append(',').Append(F(Y(Points[i].V))).Append(' ');
+        _line = sb.ToString();
+        _area = $"{_line} L{F(X(Points[^1].T))},{F(Height - Pb)} L{F(X(Points[0].T))},{F(Height - Pb)} Z";
+
+        double span = _max - _min;
+        _tickFormat = span < 5 ? "0.0" : "0";
+        _yTicks = Enumerable.Range(0, 4).Select(i => _min + span * (i + 0.5) / 4).ToList();
+
+        var spanTime = TimeSpan.FromTicks(_t1 - _t0);
+        string fmt = spanTime.TotalHours > 24 ? "dd MMM HH:mm" : spanTime.TotalMinutes > 30 ? "HH:mm" : "HH:mm:ss";
+        _xTicks = Enumerable.Range(0, 4).Select(i =>
+        {
+            long t = _t0 + (_t1 - _t0) * (i * 2 + 1) / 8;
+            return (X(new DateTime(t, DateTimeKind.Utc)), TimeFormat.ToSast(new DateTime(t, DateTimeKind.Utc)).ToString(fmt));
+        }).ToList();
+    }
+
+    private double X(DateTime t) => Pl + (t.Ticks - _t0) / (double)(_t1 - _t0) * (W - Pl - Pr);
+    private double Y(double v) => Pt + (1 - (v - _min) / (_max - _min)) * (Height - Pt - Pb);
+    private static string F(double d) => d.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
+}
